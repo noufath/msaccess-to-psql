@@ -5,21 +5,13 @@ import psycopg2.extras as extras
 import sys
 
 
-""" 
-Use references from:
-1. pyodbc's doc: https://github.com/mkleehammer/pyodbc/wiki/Cursor
-2. SQLStatistic function : https://docs.microsoft.com/en-us/sql/odbc/reference/syntax/sqlstatistics-function?redirectedfrom=MSDN&view=sql-server-ver15
-3. Workbench migration Ms.Access : https://dev.mysql.com/doc/workbench/en/wb-migration-database-access.html
-4. Ms.Access migration to postgres : https://github.com/remoteworkerid/acc2psql
-"""
-
 class mdb2psql:
 
-    def __init__(self, mdb_file, pg_host, pg_db, pg_user, pg_password, print_SQL):
+    def __init__(self, mdb_file, pg_host, pg_db, pg_user, pg_password, use_schema, print_SQL):
         self.access_cursor = pyodbc.connect(f'Driver={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={mdb_file};').cursor()
         self.schema_name = self.get_access_dbname()
         self.print_SQL = print_SQL
-        self.pg_user = pg_user
+        self.use_schema = use_schema
 
         self.param_dic = {
             "host"      : pg_host,
@@ -48,13 +40,14 @@ class mdb2psql:
 
     
     def create_schema(self):
-        str_SQL = 'DROP SCHEMA IF EXISTS {schema_name} CASCADE; CREATE SCHEMA {schema_name};'.format(schema_name=self.schema_name)
+        if self.use_schema:
+            str_SQL = 'DROP SCHEMA IF EXISTS {schema_name} CASCADE; CREATE SCHEMA {schema_name};'.format(schema_name=self.schema_name)
     
-        if self.print_SQL:
-            print(str_SQL)
+            if self.print_SQL:
+                print(str_SQL)
         
-        self.pg_cursor.execute(str_SQL)
-        self.pg_conn.commit()
+            self.pg_cursor.execute(str_SQL)
+            self.pg_conn.commit()
 
         self.create_tables()
         
@@ -72,11 +65,18 @@ class mdb2psql:
         table_order = list()
         for table in table_list:
             str_SQL = ''
-            str_SQL = 'DROP TABLE IF EXISTS {schema_name}.{table} CASCADE;\n' \
-                .format(schema_name=self.schema_name, table=table)
-            str_SQL += 'CREATE TABLE {schema_name}.{table} (\n' \
-                .format(schema_name=self.schema_name, table=table)
-            str_SQL += self.create_fields(table)
+            if self.use_schema:
+                str_SQL = 'DROP TABLE IF EXISTS {schema_name}.{table} CASCADE;\n' \
+                    .format(schema_name=self.schema_name, table=table)
+                str_SQL += 'CREATE TABLE {schema_name}.{table} (\n' \
+                    .format(schema_name=self.schema_name, table=table)
+                str_SQL += self.create_fields(table)
+            else:
+                str_SQL = 'DROP TABLE IF EXISTS {table} CASCADE;\n' \
+                    .format(table=table)
+                str_SQL += 'CREATE TABLE {table} (\n' \
+                    .format(table=table)
+                str_SQL += self.create_fields(table)
 
             # collecting str query to create independent tables first
             if 'FOREIGN KEY' not in str_SQL:
@@ -138,7 +138,10 @@ class mdb2psql:
             table_reference = row[2]
             if foreign_keys_exist.get(row[1], None) is None:
                 foreign_keys_exist[row[1]] = True
-                foreign_keys = f'{foreign_keys} FOREIGN KEY ({foreign_key}) REFERENCES {self.schema_name}.{table_reference} ({foreign_key}) ON DELETE CASCADE,\n'
+                if self.use_schema:
+                    foreign_keys = f'{foreign_keys} FOREIGN KEY ({foreign_key}) REFERENCES {self.schema_name}.{table_reference} ({foreign_key}) ON DELETE CASCADE,\n'
+                else:
+                    foreign_keys = f'{foreign_keys} FOREIGN KEY ({foreign_key}) REFERENCES {table_reference} ({foreign_key}) ON DELETE CASCADE,\n'
 
         foreign_keys = foreign_keys[:-2]
 
@@ -181,11 +184,18 @@ class mdb2psql:
                  # pre-bind the arguments before executing - for speed
                 args_string = ','.join(self.pg_cursor.mogrify(format_string, x).decode('utf-8') for x in data)
                 column = ','.join(list(self.get_column(table)))
-                str_SQL = "INSERT INTO %s(%s) VALUES " % (self.schema_name + '.' + table, column) + args_string
 
-                if self.print_SQL:
-                    print('INSERT INTO {schema_name}.{table_name} VALUES {value_list}'.format(schema_name=self.schema_name, table_name=table, value_list=args_string))
+                if self.use_schema:
+                    str_SQL = "INSERT INTO %s(%s) VALUES " % (self.schema_name + '.' + table, column) + args_string
 
+                    if self.print_SQL:
+                        print('INSERT INTO {schema_name}.{table_name} VALUES {value_list}'.format(schema_name=self.schema_name, table_name=table, value_list=args_string))
+                else:
+                    str_SQL = "INSERT INTO %s(%s) VALUES " % (table, column) + args_string
+
+                    if self.print_SQL:
+                        print('INSERT INTO {table_name} VALUES {value_list}'.format(table_name=table, value_list=args_string))
+                    
                
                 try:
                     self.pg_cursor.execute(str_SQL, data)
